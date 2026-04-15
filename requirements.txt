@@ -4,6 +4,12 @@ cadquery
 streamlit_stl
 openai
 cadquery-ocp
+
+vtk
+numpy
+ezdxf
+multimethod
+
 # CadQuery dependencies (commonly required)
 numpy
 scipy
