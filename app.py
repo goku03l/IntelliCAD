@@ -5,10 +5,10 @@ from streamlit_stl import stl_from_file
 
 # 🔐 Use Streamlit secrets (IMPORTANT)
 # Put this in .streamlit/secrets.toml:
-OPENAI_API_KEY = "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"
+
 
 # 🔐 Use Streamlit secrets
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 st.set_page_config(page_title="IntelliCAD AI", layout="wide")
 
