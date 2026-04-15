@@ -1,0 +1,25 @@
+# Core
+streamlit==1.56.0
+cadquery==2.4.0
+streamlit_stl==0.0.6
+
+# CadQuery dependencies (commonly required)
+numpy
+scipy
+typing-extensions
+
+# Visualization / STL handling
+numpy-stl
+trimesh
+
+# Streamlit ecosystem (optional but useful)
+pandas
+pyyaml
+watchdog
+
+# Rendering / 3D support
+pythreejs
+ipython
+
+# Misc utilities
+matplotlib
