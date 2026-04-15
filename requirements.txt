@@ -3,7 +3,7 @@ streamlit==1.56.0
 cadquery==2.4.0
 streamlit_stl==0.0.6
 openai
-OCP==7.7.2
+cadquery-ocp
 # CadQuery dependencies (commonly required)
 numpy
 scipy
