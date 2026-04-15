@@ -1,7 +1,7 @@
 # Core
 streamlit==1.56.0
-cadquery==2.4.0
-streamlit_stl==0.0.6
+cadquery
+streamlit_stl
 openai
 cadquery-ocp
 # CadQuery dependencies (commonly required)
@@ -12,6 +12,7 @@ typing-extensions
 # Visualization / STL handling
 numpy-stl
 trimesh
+numpy
 
 # Streamlit ecosystem (optional but useful)
 pandas
