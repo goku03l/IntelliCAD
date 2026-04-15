@@ -205,5 +205,4 @@ Return ONLY corrected full code.
 
             if attempt == MAX_RETRIES - 1:
                 st.error("❌ Failed after multiple attempts.")
-                st.code(code)
                 st.text(error_message)
