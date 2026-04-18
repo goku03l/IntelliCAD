@@ -186,7 +186,7 @@ Update the design accordingly.
         if intent == "GENERAL_QUESTION" or intent == "GREETINGS":
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": "Hello, I specialize in 3D CAD modeling, I can convert your design ideas into 3D CAD. Describe the object you want to create."
+                "content": "Hello, I specialize in 3D CAD modeling, I can convert your design ideas into 3D CAD. Describe the object you want to create.( Try asking : Generate a Dice of size 3cm.)"
             })
             st.session_state.pending_prompt = None
             st.rerun()
