@@ -57,8 +57,7 @@ with right:
             st.markdown(f"**{plan.get('object', '')}**")
             if plan.get("dimensions"):
                 st.markdown("📐 **Dimensions**")
-                for k, v in plan["dimensions"].items():
-                    st.markdown(f"- {k}: `{v}`")
+                st.markdown(plan["dimensions"])
             if plan.get("operations"):
                 st.markdown("⚙️ **Operations**")
                 for op in plan["operations"]:
@@ -99,21 +98,20 @@ TOOLS = [
                     "description": "What is being modelled, e.g. 'M8 hex bolt ISO 4014'"
                 },
                 "dimensions": {
-                    "type": "object",
-                    "description": "Key-value pairs of all dimensions, e.g. {\"length\": \"80mm\", \"head_diameter\": \"13mm\"}",
-                    "additionalProperties": {"type": "string"}
+                    "type": "string",
+                    "description": "All key dimensions as a readable string, e.g. 'length: 80mm, head_diameter: 13mm, thread_pitch: 1.25mm'"
                 },
                 "operations": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Ordered CadQuery operations, e.g. [\"box 13x13x5 for head\", \"extrude cylinder for shank\", \"fillet edges\"]"
+                    "description": "Ordered CadQuery operations, e.g. ['box 13x13x5 for head', 'extrude cylinder for shank', 'fillet edges']"
                 },
                 "notes": {
                     "type": "string",
-                    "description": "Any special considerations, tolerances, or assumptions"
+                    "description": "Any special considerations, tolerances, or assumptions. Use empty string if none."
                 }
             },
-            "required": ["object", "dimensions", "operations"],
+            "required": ["object", "dimensions", "operations", "notes"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -144,14 +142,14 @@ TOOLS = [
 # -----------------------
 # ⚙️ Tool implementations
 # -----------------------
-def plan_design(object: str, dimensions: dict, operations: list, notes: str = "") -> str:
+def plan_design(object: str, dimensions: str, operations: list, notes: str = "") -> str:
     st.session_state.design_plan = {
         "object": object,
         "dimensions": dimensions,
         "operations": operations,
         "notes": notes,
     }
-    return f"Plan saved: {object} with {len(dimensions)} dimensions and {len(operations)} operations. Proceed to run_cadquery."
+    return f"Plan saved: {object} | {dimensions} | {len(operations)} operations. Proceed to run_cadquery."
 
 
 def run_cadquery(code: str) -> str:
