@@ -268,14 +268,13 @@ def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
         # Show web search activity
         for item in response.output:
             if item.type == "web_search_call":
-                with trace_box:
-                    action = getattr(item, "action", None)
-                    if action and hasattr(action, "query"):
-                        queries = action.query if isinstance(action.query, list) else [action.query]
-                        for q in queries:
-                            st.info(f"🔍 **Searching:** _{q}_")
-                    else:
-                        st.info("🔍 **Searching the web...**")
+                action = getattr(item, "action", None)
+                if action and hasattr(action, "query"):
+                    queries = action.query if isinstance(action.query, list) else [action.query]
+                    for q in queries:
+                        trace_box.write(f"🔍 Searching: _{q}_")
+                else:
+                    trace_box.write("🔍 Searching the web...")
 
         # Check for custom function calls
         function_calls = [item for item in response.output if item.type == "function_call"]
@@ -297,22 +296,19 @@ def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
         for fc in function_calls:
             args = json.loads(fc.arguments)
 
-            with trace_box:
-                if fc.name == "plan_design":
-                    st.info(f"🗂 **Planning design:** _{args.get('object', '')}_")
-                elif fc.name == "run_cadquery":
-                    st.info("⚙️ **Running CadQuery...**")
+            if fc.name == "plan_design":
+                trace_box.write(f"🗂 Planning: _{args.get('object', '')}_")
+            elif fc.name == "run_cadquery":
+                trace_box.write("⚙️ Running CadQuery code...")
 
             result = dispatch(fc.name, args)
 
             if fc.name == "run_cadquery":
                 if result.startswith("SUCCESS"):
                     model_generated = True
-                    with trace_box:
-                        st.success("✅ Model generated!")
+                    trace_box.write("✅ Model generated!")
                 else:
-                    with trace_box:
-                        st.warning(f"⚠️ {result[:160]}")
+                    trace_box.write(f"⚠️ {result[:160]}")
 
             input_messages.append({
                 "type": "function_call_output",
@@ -331,9 +327,12 @@ if st.session_state.pending_prompt:
 
     with left:
         with st.chat_message("assistant"):
-            trace_box = st.container()
-            with st.spinner("Thinking…"):
-                final_response, model_generated = run_agent(prompt, trace_box)
+            with st.status("Agent working...", expanded=True) as status:
+                final_response, model_generated = run_agent(prompt, status)
+                if model_generated:
+                    status.update(label="✅ Done!", state="complete", expanded=False)
+                else:
+                    status.update(label="💬 Replied", state="complete", expanded=False)
 
             st.markdown(final_response)
 
