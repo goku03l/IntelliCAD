@@ -2,6 +2,7 @@ import streamlit as st
 from openai import OpenAI
 import cadquery as cq
 from streamlit_stl import stl_from_file
+import json
 
 # -----------------------
 # 🔐 Setup
@@ -9,26 +10,19 @@ from streamlit_stl import stl_from_file
 client = OpenAI()
 
 st.set_page_config(page_title="IntelliCAD AI", layout="wide", page_icon="icon.png")
-st.title("🧠 IntelliCAD AI")
+st.title("🧠 IntelliCAD AI — Agentic")
 
 # -----------------------
 # 🧠 Session State
 # -----------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "last_code" not in st.session_state:
-    st.session_state.last_code = None
-
-if "pending_prompt" not in st.session_state:
-    st.session_state.pending_prompt = None
-
-# ✅ NEW
-if "design_spec" not in st.session_state:
-    st.session_state.design_spec = None
-
-if "design_mode" not in st.session_state:
-    st.session_state.design_mode = False
+for key, default in {
+    "messages": [],
+    "last_code": None,
+    "pending_prompt": None,
+    "model_ready": False,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # -----------------------
 # 🧱 Layout
@@ -40,19 +34,13 @@ left, right = st.columns([3, 2], gap="large")
 # -----------------------
 with left:
     st.subheader("💬 CAD Assistant")
-
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    user_input = st.chat_input("Describe your model or changes...")
-
+    user_input = st.chat_input("Describe your model or ask anything...")
     if user_input:
-        st.session_state.messages.append({
-            "role": "user",
-            "content": user_input
-        })
-
+        st.session_state.messages.append({"role": "user", "content": user_input})
         st.session_state.pending_prompt = user_input
         st.rerun()
 
@@ -63,278 +51,212 @@ with right:
     with st.container(border=True):
         st.subheader("🔍 CAD View")
         viewer_placeholder = st.empty()
-        viewer_placeholder.image("icon.png", use_container_width=True)
+        if st.session_state.model_ready:
+            with viewer_placeholder.container():
+                stl_from_file("output.stl", height=420)
+        else:
+            viewer_placeholder.image("icon.png", use_container_width=True)
 
 # -----------------------
-# 🧹 Clean Code
+# 🔧 Tool Definition
+# Only run_cadquery is a custom tool.
+# Web search is handled natively by OpenAI — no code needed.
 # -----------------------
-def clean_code(code_text):
-    if "```" in code_text:
-        code_text = code_text.split("```")[1]
-        code_text = code_text.replace("python", "")
-    return code_text.strip()
-
-# -----------------------
-# 🧠 Intent Classifier
-# -----------------------
-def classify_intent(user_input):
-    response = client.chat.completions.create(
-        model="gpt-5-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": """
-Classify user input into ONE of:
-
-1. CAD_REQUEST
-2. DESIGN DESCRIPTION
-3. GENERAL_QUESTION
-4. UNCLEAR
-5. GREETINGS
-
-Examples:
-"Hi" → GREETINGS
-"Who are you?" → GREETINGS
-"create cube" → CAD_REQUEST
-"design donut" → DESIGN DESCRIPTION
-"what is donut shape?" → DESIGN DESCRIPTION
-"What does a Steering wheel look like?" → DESIGN DESCRIPTION
-"who is MS Dhoni>" → GENERAL_QUESTION
-"asdf" → UNCLEAR
-
-Return only the label.
-"""
+TOOLS = [
+    {
+        "type": "web_search_preview",     # ← OpenAI built-in, free to use, no extra key
+    },
+    {
+        "type": "function",
+        "name": "run_cadquery",
+        "description": (
+            "Execute CadQuery Python code to generate a 3D model. "
+            "The code MUST define a variable named 'result' holding the final CadQuery shape. "
+            "Returns 'SUCCESS' or an 'ERROR: <message>' string. "
+            "If you get an error, fix the code and call this again."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Complete, runnable CadQuery Python code. Must define 'result'."
+                }
             },
-            {"role": "user", "content": user_input}
-        ]
-    )
-    return response.choices[0].message.content.strip()
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+]
 
 # -----------------------
-# 🧠 Explain / Refine Shape
+# ⚙️ run_cadquery tool
 # -----------------------
-def explain_shape(prompt):
-    
-    response = client.chat.completions.create(
-        model="gpt-5-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": """
-You are a CAD assistant.
-
-Explain or refine the object in geometric/CAD terms:
-- shape
-- structure
-- parameters
-- how it's modeled
-- Short and breif less than 250 words
-Continuously improve the design based on user input.
-"""
-            },
-            {"role": "user", "content": prompt}
-        ]
-    )
-    return response.choices[0].message.content
+def run_cadquery(code: str) -> str:
+    try:
+        local_vars = {}
+        exec(code, {"cq": cq}, local_vars)
+        result = local_vars.get("result")
+        if result is None:
+            return "ERROR: Code ran but 'result' was not defined. Assign your final shape to 'result'."
+        cq.exporters.export(result, "output.step")
+        cq.exporters.export(result, "output.stl")
+        st.session_state.last_code = code
+        st.session_state.model_ready = True
+        return "SUCCESS: 3D model generated and saved as output.stl and output.step."
+    except Exception as e:
+        return f"ERROR: {e}"
 
 # -----------------------
-# 🤖 MAIN FLOW
+# 🧠 System Prompt
 # -----------------------
-MAX_RETRIES = 5
+SYSTEM_PROMPT = """You are IntelliCAD — an expert agentic AI for generating precise 3D CAD models using CadQuery.
 
+## Your tools
+1. web_search        — built-in web search. Use it to find real-world dimensions, standards,
+                       and CadQuery API syntax before writing code.
+2. run_cadquery       — executes CadQuery Python code and generates the 3D model.
+
+## Your workflow
+1. For any real-world object (bolt, nut, gear, wheel, pipe, bracket, etc.)
+   → web_search for its standard dimensions FIRST (e.g. "M8 hex bolt ISO 4014 dimensions mm").
+2. If you are unsure about CadQuery syntax for a shape
+   → web_search "cadquery <shape> example" before writing code.
+3. Write clean CadQuery code and call run_cadquery.
+4. If it returns ERROR → read it, fix the code, call run_cadquery again (max 4 attempts).
+5. Once SUCCESS → give the user a short summary: what was built and the key dimensions used.
+
+## CadQuery rules
+- Always define 'result' as the final shape.
+- Use metric units (mm) unless the user specifies otherwise.
+- Import nothing — only 'cq' is available in the execution scope.
+
+## CadQuery name mappings
+donut/ring → torus | pipe/tube → hollow cylinder
+
+## Off-topic requests
+Politely say you specialize in 3D CAD modeling only."""
+
+# -----------------------
+# 🤖 Agent Loop
+# Uses the Responses API — web search is automatic, no Tavily needed.
+# -----------------------
+MAX_STEPS = 14
+
+
+def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
+    """
+    Runs the agentic loop using the OpenAI Responses API.
+    - web_search_call items are handled internally by OpenAI (no tool output needed).
+    - function_call items (run_cadquery) are handled by us.
+    Returns (final_text, model_was_generated).
+    """
+
+    # Build the input list: system + recent history + new user message
+    input_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for m in st.session_state.messages[-8:]:
+        input_messages.append(m)
+    input_messages.append({"role": "user", "content": user_message})
+
+    model_generated = False
+    steps = 0
+
+    while steps < MAX_STEPS:
+        response = client.responses.create(
+            model="gpt-4o",
+            tools=TOOLS,
+            input=input_messages,
+        )
+
+        steps += 1
+
+        # ── Show agent activity in the UI trace ──
+        for item in response.output:
+            if item.type == "web_search_call":
+                # Web search was triggered — show it (OpenAI handles the actual search)
+                with trace_box:
+                    action = getattr(item, "action", None)
+                    if action and hasattr(action, "query"):
+                        queries = action.query if isinstance(action.query, list) else [action.query]
+                        for q in queries:
+                            st.info(f"🔍 **Web search:** _{q}_")
+                    else:
+                        st.info("🔍 **Searching the web...**")
+
+        # ── Check if there are custom function calls to handle ──
+        function_calls = [item for item in response.output if item.type == "function_call"]
+
+        if not function_calls:
+            # No more tool calls — extract the final text from the message item
+            for item in response.output:
+                if item.type == "message":
+                    text = "".join(
+                        part.text for part in item.content if hasattr(part, "text")
+                    )
+                    return text, model_generated
+            return "Done.", model_generated
+
+        # ── Extend input with everything the model output this turn ──
+        input_messages.extend(response.output)
+
+        # ── Execute each function call and feed results back ──
+        for fc in function_calls:
+            args = json.loads(fc.arguments)
+
+            with trace_box:
+                st.info("⚙️ **Running CadQuery code...**")
+
+            result = run_cadquery(args["code"])
+
+            if result.startswith("SUCCESS"):
+                model_generated = True
+                with trace_box:
+                    st.success("✅ Model generated!")
+            else:
+                with trace_box:
+                    st.warning(f"⚠️ {result[:150]}")
+
+            # Feed result back to the model
+            input_messages.append({
+                "type": "function_call_output",
+                "call_id": fc.call_id,
+                "output": result,
+            })
+
+    return "⚠️ Reached the maximum number of steps. Please try a simpler or more specific request.", model_generated
+
+
+# -----------------------
+# 🚀 Main execution
+# -----------------------
 if st.session_state.pending_prompt:
-
     prompt = st.session_state.pending_prompt
 
-    # -----------------------
-    # ✏️ DESIGN REFINEMENT MODE (NEW CORE)
-    # -----------------------
-    if st.session_state.design_mode:
+    with left:
+        with st.chat_message("assistant"):
+            trace_box = st.container()
+            with st.spinner("Agent working…"):
+                final_response, model_generated = run_agent(prompt, trace_box)
 
-        if any(word in prompt.lower() for word in ["generate", "create", "build"]):
-            prompt = st.session_state.design_spec
-            st.session_state.design_mode = False
+            st.markdown(final_response)
 
-        else:
-            with st.spinner(f"Thinking..."):
-                updated_explanation = explain_shape(f"""
-Current design:
-{st.session_state.design_spec}
-
-User modification:
-{prompt}
-
-Update the design accordingly.
-""")
-
-            st.session_state.design_spec = updated_explanation
-
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": updated_explanation
-            })
-
-            st.session_state.pending_prompt = None
-            st.rerun()
-
-    else:
-        intent = classify_intent(prompt)
-
-        # -----------------------
-        # 🚫 GENERAL
-        # -----------------------
-        if intent == "GENERAL_QUESTION" or intent == "GREETINGS":
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": "Hello, I specialize in 3D CAD modeling, I can convert your design ideas into 3D CAD. Describe the object you want to create. (Try asking: Generate a Dice of size 3cm.)"
-            })
-            st.session_state.pending_prompt = None
-            st.rerun()
-
-        # -----------------------
-        # ❓ UNCLEAR
-        # -----------------------
-        elif intent == "UNCLEAR":
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": "❓ Could you clarify what you want to design?"
-            })
-            st.session_state.pending_prompt = None
-            st.rerun()
-
-        # -----------------------
-        # 🧠 DESIGN DESCRIPTION → START DESIGN MODE
-        # -----------------------
-        elif intent == "DESIGN DESCRIPTION":
-            with st.spinner(f"Thinking..."):
-                explanation = explain_shape(prompt)
-
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": explanation
-            })
-
-            st.session_state.design_mode = True
-            st.session_state.design_spec = explanation
-
-            st.session_state.pending_prompt = None
-            st.rerun()
-
-    # -----------------------
-    # 🔁 Correction Handling
-    # -----------------------
-    if any(word in prompt.lower() for word in ["wrong", "fix", "change"]):
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": "Got it 👍 What should I adjust?"
-        })
-        st.session_state.pending_prompt = None
-        st.rerun()
-
-    # -----------------------
-    # ✅ CAD GENERATION
-    # -----------------------
-    code = None
-    error_message = None
-
-    for attempt in range(MAX_RETRIES):
-
-        with st.spinner(f"Generating... iteration {attempt+1}"):
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": """
-You are a CadQuery expert.
-
-Rules:
-- Generate full working CadQuery code
-- Always define 'result'
-- No explanation in code
-
-Mappings:
-- donut → torus
-- ring → torus
-- pipe → hollow cylinder
-"""
-                }
-            ]
-
-            for m in st.session_state.messages:
-                messages.append(m)
-
-            if st.session_state.last_code:
-                messages.append({
-                    "role": "user",
-                    "content": f"""
-Modify this:
-
-{st.session_state.last_code}
-
-Request:
-{prompt}
-"""
-                })
-
-            if code and error_message:
-                messages.append({
-                    "role": "user",
-                    "content": f"""
-Fix this:
-
-{code}
-
-Error:
-{error_message}
-"""
-                })
-
-            response = client.chat.completions.create(
-                model="gpt-5-mini",
-                messages=messages,
-            )
-
-            code = clean_code(response.choices[0].message.content)
-
-            try:
-                local_vars = {}
-                exec(code, {"cq": cq}, local_vars)
-                result = local_vars.get("result")
-
-                if result:
-                    cq.exporters.export(result, "output.step")
-                    cq.exporters.export(result, "output.stl")
-
-                    st.session_state.last_code = code
-
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": f"🛠️ Model created for: **{prompt}**"
-                    })
-
-                    st.success("✅ Model generated")
-
+            if model_generated:
+                col1, col2 = st.columns(2)
+                with col1:
                     with open("output.step", "rb") as f:
-                        st.download_button("Download STEP", f, "model.step")
-
+                        st.download_button("⬇️ Download STEP", f, "model.step")
+                with col2:
                     with open("output.stl", "rb") as f:
-                        st.download_button("Download STL", f, "model.stl")
+                        st.download_button("⬇️ Download STL", f, "model.stl")
 
-                    with viewer_placeholder.container():
-                        stl_from_file("output.stl", height=420)
+    if model_generated:
+        with viewer_placeholder.container():
+            stl_from_file("output.stl", height=420)
 
-                    break
-
-                else:
-                    error_message = "No result"
-
-            except Exception as e:
-                error_message = str(e)
-
-            if attempt == MAX_RETRIES - 1:
-                st.error(error_message)
-
+    st.session_state.messages.append({"role": "assistant", "content": final_response})
     st.session_state.pending_prompt = None
+    st.rerun()
 
 # -----------------------
 # 🔄 Reset
@@ -344,7 +266,6 @@ if st.button("🔄 Reset Conversation"):
     st.session_state.messages = []
     st.session_state.last_code = None
     st.session_state.pending_prompt = None
-    st.session_state.design_mode = False
-    st.session_state.design_spec = None
+    st.session_state.model_ready = False
     st.success("Reset complete")
     st.rerun()
