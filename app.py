@@ -10,7 +10,7 @@ import json
 client = OpenAI()
 
 st.set_page_config(page_title="IntelliCAD AI", layout="wide", page_icon="icon.png")
-st.title("🧠 IntelliCAD AI — Agentic")
+st.title("🧠 IntelliCAD AI")
 
 # -----------------------
 # 🧠 Session State
