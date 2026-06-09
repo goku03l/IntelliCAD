@@ -10,7 +10,7 @@ import json
 client = OpenAI()
 
 st.set_page_config(page_title="IntelliCAD AI", layout="wide", page_icon="icon.png")
-st.title("🧠 IntelliCAD AI")
+st.title("🧠 IntelliCAD AI — Agentic")
 
 # -----------------------
 # 🧠 Session State
@@ -20,6 +20,7 @@ for key, default in {
     "last_code": None,
     "pending_prompt": None,
     "model_ready": False,
+    "design_plan": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -45,42 +46,92 @@ with left:
         st.rerun()
 
 # -----------------------
-# 🔍 CAD VIEW
+# 🔍 CAD VIEW + DESIGN PLAN
 # -----------------------
 with right:
+    # Design plan card (shows agent's reasoning before generation)
+    if st.session_state.design_plan:
+        with st.container(border=True):
+            st.caption("🗂 Design plan")
+            plan = st.session_state.design_plan
+            st.markdown(f"**{plan.get('object', '')}**")
+            if plan.get("dimensions"):
+                st.markdown("📐 **Dimensions**")
+                for k, v in plan["dimensions"].items():
+                    st.markdown(f"- {k}: `{v}`")
+            if plan.get("operations"):
+                st.markdown("⚙️ **Operations**")
+                for op in plan["operations"]:
+                    st.markdown(f"- {op}")
+            if plan.get("notes"):
+                st.caption(plan["notes"])
+
     with st.container(border=True):
         st.subheader("🔍 CAD View")
         viewer_placeholder = st.empty()
         if st.session_state.model_ready:
             with viewer_placeholder.container():
-                stl_from_file("output.stl", height=420)
+                stl_from_file("output.stl", height=380)
         else:
             viewer_placeholder.image("icon.png", use_container_width=True)
 
 # -----------------------
-# 🔧 Tool Definition
-# Only run_cadquery is a custom tool.
-# Web search is handled natively by OpenAI — no code needed.
+# 🔧 Tools
 # -----------------------
 TOOLS = [
     {
-        "type": "web_search_preview",     # ← OpenAI built-in, free to use, no extra key
+        "type": "web_search_preview",
+    },
+    {
+        "type": "function",
+        "name": "plan_design",
+        "description": (
+            "Before writing any CadQuery code, call this to lock down the design. "
+            "Specify the exact object, all dimensions, and the ordered list of CadQuery "
+            "operations you will use. This ensures the generated model matches user intent. "
+            "ALWAYS call this before run_cadquery."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "object": {
+                    "type": "string",
+                    "description": "What is being modelled, e.g. 'M8 hex bolt ISO 4014'"
+                },
+                "dimensions": {
+                    "type": "object",
+                    "description": "Key-value pairs of all dimensions, e.g. {\"length\": \"80mm\", \"head_diameter\": \"13mm\"}",
+                    "additionalProperties": {"type": "string"}
+                },
+                "operations": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered CadQuery operations, e.g. [\"box 13x13x5 for head\", \"extrude cylinder for shank\", \"fillet edges\"]"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Any special considerations, tolerances, or assumptions"
+                }
+            },
+            "required": ["object", "dimensions", "operations"],
+            "additionalProperties": False,
+        },
+        "strict": True,
     },
     {
         "type": "function",
         "name": "run_cadquery",
         "description": (
-            "Execute CadQuery Python code to generate a 3D model. "
-            "The code MUST define a variable named 'result' holding the final CadQuery shape. "
-            "Returns 'SUCCESS' or an 'ERROR: <message>' string. "
-            "If you get an error, fix the code and call this again."
+            "Execute CadQuery Python code to generate the 3D model. "
+            "Must define a variable 'result' with the final shape. "
+            "Returns SUCCESS or ERROR. Fix errors and retry."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Complete, runnable CadQuery Python code. Must define 'result'."
+                    "description": "Full CadQuery Python code. Must assign final shape to 'result'."
                 }
             },
             "required": ["code"],
@@ -91,71 +142,117 @@ TOOLS = [
 ]
 
 # -----------------------
-# ⚙️ run_cadquery tool
+# ⚙️ Tool implementations
 # -----------------------
+def plan_design(object: str, dimensions: dict, operations: list, notes: str = "") -> str:
+    st.session_state.design_plan = {
+        "object": object,
+        "dimensions": dimensions,
+        "operations": operations,
+        "notes": notes,
+    }
+    return f"Plan saved: {object} with {len(dimensions)} dimensions and {len(operations)} operations. Proceed to run_cadquery."
+
+
 def run_cadquery(code: str) -> str:
     try:
         local_vars = {}
         exec(code, {"cq": cq}, local_vars)
         result = local_vars.get("result")
         if result is None:
-            return "ERROR: Code ran but 'result' was not defined. Assign your final shape to 'result'."
+            return "ERROR: 'result' not defined. Assign your final CadQuery shape to 'result'."
         cq.exporters.export(result, "output.step")
         cq.exporters.export(result, "output.stl")
         st.session_state.last_code = code
         st.session_state.model_ready = True
-        return "SUCCESS: 3D model generated and saved as output.stl and output.step."
+        return "SUCCESS: Model saved as output.stl and output.step."
     except Exception as e:
         return f"ERROR: {e}"
+
+
+def dispatch(name: str, args: dict) -> str:
+    if name == "plan_design":
+        return plan_design(**args)
+    if name == "run_cadquery":
+        return run_cadquery(args["code"])
+    return f"Unknown tool: {name}"
 
 # -----------------------
 # 🧠 System Prompt
 # -----------------------
-SYSTEM_PROMPT = """You are IntelliCAD — an expert agentic AI for generating precise 3D CAD models using CadQuery.
+SYSTEM_PROMPT = """You are IntelliCAD — an expert CAD assistant that generates precise 3D models using CadQuery.
 
-## Your tools
-1. web_search        — built-in web search. Use it to find real-world dimensions, standards,
-                       and CadQuery API syntax before writing code.
-2. run_cadquery       — executes CadQuery Python code and generates the 3D model.
+═══════════════════════════════════════
+DECISION: CLARIFY vs GENERATE
+═══════════════════════════════════════
 
-## Your workflow
-1. For any real-world object (bolt, nut, gear, wheel, pipe, bracket, etc.)
-   → web_search for its standard dimensions FIRST (e.g. "M8 hex bolt ISO 4014 dimensions mm").
-2. If you are unsure about CadQuery syntax for a shape
-   → web_search "cadquery <shape> example" before writing code.
-3. Write clean CadQuery code and call run_cadquery.
-4. If it returns ERROR → read it, fix the code, call run_cadquery again (max 4 attempts).
-5. Once SUCCESS → give the user a short summary: what was built and the key dimensions used.
+GENERATE IMMEDIATELY — no questions needed:
+  • User gave explicit dimensions ("30mm cube", "cylinder 50mm diameter 100mm tall")
+  • Simple primitives: box, sphere, cylinder, cone, torus
+  • Modification of an existing model ("make it taller", "add a hole")
+  • Standard objects with well-known defaults (a dice, a washer)
 
-## CadQuery rules
-- Always define 'result' as the final shape.
-- Use metric units (mm) unless the user specifies otherwise.
-- Import nothing — only 'cq' is available in the execution scope.
+ASK FIRST — always clarify before generating:
+  • Mechanical parts with critical dimensions: gears (teeth, module, pressure angle, bore),
+    brackets (mounting pattern, load, wall thickness), springs, cams, pulleys
+  • Objects with ambiguous size: "a shelf bracket" (how big? what load?)
+  • Anything where a wrong dimension makes the model useless
+  • Custom parts: "a phone stand" (which phone? angle? material thickness?)
 
-## CadQuery name mappings
-donut/ring → torus | pipe/tube → hollow cylinder
+HOW TO ASK:
+  Be specific and brief. Ask only the 2-3 dimensions that matter most.
+  Format: "Before I generate, I need a few dimensions:
+  - Overall length?
+  - Mounting hole diameter and spacing?
+  - Wall thickness?"
 
-## Off-topic requests
-Politely say you specialize in 3D CAD modeling only."""
+═══════════════════════════════════════
+WORKFLOW (once you have enough info)
+═══════════════════════════════════════
+
+Step 1 — RESEARCH (if needed)
+  • Standard objects: web_search "M8 bolt ISO dimensions mm" BEFORE planning
+  • Unsure about CadQuery syntax: web_search "cadquery <operation> example"
+  • Never guess standard dimensions — always verify
+
+Step 2 — PLAN (always)
+  • Call plan_design with exact object name, all dimensions, and ordered operations
+  • This locks down what you will build before touching code
+
+Step 3 — GENERATE
+  • Write clean CadQuery code from your plan
+  • Call run_cadquery
+  • On ERROR: read carefully, fix specifically, retry (max 4 times)
+  • On SUCCESS: give a brief summary of what was built
+
+═══════════════════════════════════════
+CADQUERY RULES
+═══════════════════════════════════════
+  • Only 'cq' is available — import nothing else
+  • Always assign final shape to 'result'
+  • Use mm unless user says otherwise
+  • Think in operations: extrude → cut → fillet → shell — plan the sequence first
+  • Common mappings: donut/ring → torus | pipe/tube → hollow cylinder | slot → rectangle cut
+
+═══════════════════════════════════════
+DESIGN QUALITY
+═══════════════════════════════════════
+  • Real objects need real proportions — search for them, don't invent them
+  • Add details that make sense: fillets on sharp edges, chamfers on bolt heads
+  • Think about manufacturability: wall thickness ≥ 2mm, no impossible geometry
+  • After SUCCESS, tell the user: what was built, key dimensions used, any assumptions made
+
+Off-topic questions: politely redirect to CAD modeling."""
 
 # -----------------------
 # 🤖 Agent Loop
-# Uses the Responses API — web search is automatic, no Tavily needed.
 # -----------------------
-MAX_STEPS = 14
+MAX_STEPS = 16
 
 
 def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
-    """
-    Runs the agentic loop using the OpenAI Responses API.
-    - web_search_call items are handled internally by OpenAI (no tool output needed).
-    - function_call items (run_cadquery) are handled by us.
-    Returns (final_text, model_was_generated).
-    """
-
-    # Build the input list: system + recent history + new user message
     input_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for m in st.session_state.messages[-8:]:
+    for m in st.session_state.messages[-10:]:
         input_messages.append(m)
     input_messages.append({"role": "user", "content": user_message})
 
@@ -168,27 +265,25 @@ def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
             tools=TOOLS,
             input=input_messages,
         )
-
         steps += 1
 
-        # ── Show agent activity in the UI trace ──
+        # Show web search activity
         for item in response.output:
             if item.type == "web_search_call":
-                # Web search was triggered — show it (OpenAI handles the actual search)
                 with trace_box:
                     action = getattr(item, "action", None)
                     if action and hasattr(action, "query"):
                         queries = action.query if isinstance(action.query, list) else [action.query]
                         for q in queries:
-                            st.info(f"🔍 **Web search:** _{q}_")
+                            st.info(f"🔍 **Searching:** _{q}_")
                     else:
                         st.info("🔍 **Searching the web...**")
 
-        # ── Check if there are custom function calls to handle ──
+        # Check for custom function calls
         function_calls = [item for item in response.output if item.type == "function_call"]
 
+        # No function calls → agent is done (either asked a question or finished)
         if not function_calls:
-            # No more tool calls — extract the final text from the message item
             for item in response.output:
                 if item.type == "message":
                     text = "".join(
@@ -197,34 +292,37 @@ def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
                     return text, model_generated
             return "Done.", model_generated
 
-        # ── Extend input with everything the model output this turn ──
+        # Extend history with this turn's output
         input_messages.extend(response.output)
 
-        # ── Execute each function call and feed results back ──
+        # Execute each function call
         for fc in function_calls:
             args = json.loads(fc.arguments)
 
             with trace_box:
-                st.info("⚙️ **Running CadQuery code...**")
+                if fc.name == "plan_design":
+                    st.info(f"🗂 **Planning design:** _{args.get('object', '')}_")
+                elif fc.name == "run_cadquery":
+                    st.info("⚙️ **Running CadQuery...**")
 
-            result = run_cadquery(args["code"])
+            result = dispatch(fc.name, args)
 
-            if result.startswith("SUCCESS"):
-                model_generated = True
-                with trace_box:
-                    st.success("✅ Model generated!")
-            else:
-                with trace_box:
-                    st.warning(f"⚠️ {result[:150]}")
+            if fc.name == "run_cadquery":
+                if result.startswith("SUCCESS"):
+                    model_generated = True
+                    with trace_box:
+                        st.success("✅ Model generated!")
+                else:
+                    with trace_box:
+                        st.warning(f"⚠️ {result[:160]}")
 
-            # Feed result back to the model
             input_messages.append({
                 "type": "function_call_output",
                 "call_id": fc.call_id,
                 "output": result,
             })
 
-    return "⚠️ Reached the maximum number of steps. Please try a simpler or more specific request.", model_generated
+    return "⚠️ Too many steps. Try a more specific request.", model_generated
 
 
 # -----------------------
@@ -236,7 +334,7 @@ if st.session_state.pending_prompt:
     with left:
         with st.chat_message("assistant"):
             trace_box = st.container()
-            with st.spinner("Agent working…"):
+            with st.spinner("Thinking…"):
                 final_response, model_generated = run_agent(prompt, trace_box)
 
             st.markdown(final_response)
@@ -245,14 +343,14 @@ if st.session_state.pending_prompt:
                 col1, col2 = st.columns(2)
                 with col1:
                     with open("output.step", "rb") as f:
-                        st.download_button("⬇️ Download STEP", f, "model.step")
+                        st.download_button("⬇️ STEP", f, "model.step")
                 with col2:
                     with open("output.stl", "rb") as f:
-                        st.download_button("⬇️ Download STL", f, "model.stl")
+                        st.download_button("⬇️ STL", f, "model.stl")
 
     if model_generated:
         with viewer_placeholder.container():
-            stl_from_file("output.stl", height=420)
+            stl_from_file("output.stl", height=380)
 
     st.session_state.messages.append({"role": "assistant", "content": final_response})
     st.session_state.pending_prompt = None
@@ -267,5 +365,6 @@ if st.button("🔄 Reset Conversation"):
     st.session_state.last_code = None
     st.session_state.pending_prompt = None
     st.session_state.model_ready = False
+    st.session_state.design_plan = None
     st.success("Reset complete")
     st.rerun()
