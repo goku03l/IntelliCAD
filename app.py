@@ -1,7 +1,10 @@
+import base64
+import tempfile
+import os
 import streamlit as st
+import streamlit.components.v1 as components
 from openai import OpenAI
 import cadquery as cq
-from streamlit_stl import stl_from_text
 import json
 
 # -----------------------
@@ -22,9 +25,126 @@ for key, default in {
     "model_ready": False,
     "design_plan": None,
     "stl_bytes": None,
+    "step_bytes": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+# -----------------------
+# 🔍 Three.js STL Viewer (no external packages, works on Cloud)
+# -----------------------
+def stl_viewer(stl_bytes: bytes, height: int = 400):
+    b64 = base64.b64encode(stl_bytes).decode()
+    html = f"""
+    <div id="stl-container" style="width:100%;height:{height}px;background:#1a1a2e;border-radius:8px;overflow:hidden;"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+    (function() {{
+        var container = document.getElementById('stl-container');
+        var scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a2e);
+
+        var w = container.clientWidth || 600, h = {height};
+        var camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100000);
+        var renderer = new THREE.WebGLRenderer({{ antialias: true }});
+        renderer.setSize(w, h);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+
+        // Lights
+        scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+        var d = new THREE.DirectionalLight(0xffffff, 0.8);
+        d.position.set(1, 2, 3);
+        scene.add(d);
+        var d2 = new THREE.DirectionalLight(0x8888ff, 0.3);
+        d2.position.set(-2, -1, -1);
+        scene.add(d2);
+
+        // Parse binary STL from base64
+        var b64 = "{b64}";
+        var bin = atob(b64);
+        var buf = new ArrayBuffer(bin.length);
+        var arr = new Uint8Array(buf);
+        for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+
+        var geo = new THREE.BufferGeometry();
+        var view = new DataView(buf);
+        var numTris = view.getUint32(80, true);
+        var pos = new Float32Array(numTris * 9);
+        var norm = new Float32Array(numTris * 9);
+        var offset = 84;
+        for (var t = 0; t < numTris; t++) {{
+            var nx = view.getFloat32(offset, true);
+            var ny = view.getFloat32(offset+4, true);
+            var nz = view.getFloat32(offset+8, true);
+            offset += 12;
+            for (var v = 0; v < 3; v++) {{
+                var base = t * 9 + v * 3;
+                pos[base]   = view.getFloat32(offset, true);
+                pos[base+1] = view.getFloat32(offset+4, true);
+                pos[base+2] = view.getFloat32(offset+8, true);
+                norm[base] = nx; norm[base+1] = ny; norm[base+2] = nz;
+                offset += 12;
+            }}
+            offset += 2; // attribute byte count
+        }}
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
+
+        var mat = new THREE.MeshPhongMaterial({{
+            color: 0x00d4ff, specular: 0x222244, shininess: 60,
+            side: THREE.DoubleSide
+        }});
+        var mesh = new THREE.Mesh(geo, mat);
+        scene.add(mesh);
+
+        // Center + fit camera
+        geo.computeBoundingBox();
+        var box = geo.boundingBox;
+        var cx = (box.max.x + box.min.x) / 2;
+        var cy = (box.max.y + box.min.y) / 2;
+        var cz = (box.max.z + box.min.z) / 2;
+        mesh.position.set(-cx, -cy, -cz);
+        var size = Math.max(
+            box.max.x - box.min.x,
+            box.max.y - box.min.y,
+            box.max.z - box.min.z
+        );
+        camera.position.set(0, 0, size * 2);
+        camera.near = size * 0.001;
+        camera.far  = size * 100;
+        camera.updateProjectionMatrix();
+
+        // Orbit controls (mouse drag)
+        var isDragging = false, prevX = 0, prevY = 0, rotX = 0, rotY = 0;
+        var zoom = 1.0;
+        renderer.domElement.addEventListener('mousedown', function(e) {{
+            isDragging = true; prevX = e.clientX; prevY = e.clientY;
+        }});
+        window.addEventListener('mouseup', function() {{ isDragging = false; }});
+        window.addEventListener('mousemove', function(e) {{
+            if (!isDragging) return;
+            rotY += (e.clientX - prevX) * 0.01;
+            rotX += (e.clientY - prevY) * 0.01;
+            prevX = e.clientX; prevY = e.clientY;
+        }});
+        renderer.domElement.addEventListener('wheel', function(e) {{
+            zoom *= (1 + e.deltaY * 0.001);
+            zoom = Math.max(0.1, Math.min(10, zoom));
+        }});
+
+        function animate() {{
+            requestAnimationFrame(animate);
+            mesh.rotation.x = rotX;
+            mesh.rotation.y = rotY;
+            camera.position.z = size * 2 * zoom;
+            renderer.render(scene, camera);
+        }}
+        animate();
+    }})();
+    </script>
+    """
+    components.html(html, height=height + 10)
 
 # -----------------------
 # 🧱 Layout
@@ -50,7 +170,6 @@ with left:
 # 🔍 CAD VIEW + DESIGN PLAN
 # -----------------------
 with right:
-    # Design plan card (shows agent's reasoning before generation)
     if st.session_state.design_plan:
         with st.container(border=True):
             st.caption("🗂 Design plan")
@@ -68,10 +187,10 @@ with right:
 
     with st.container(border=True):
         st.subheader("🔍 CAD View")
-        if st.session_state.model_ready and st.session_state.get("stl_bytes"):
-            stl_from_text(st.session_state.stl_bytes, height=380, auto_rotate=True)
+        if st.session_state.model_ready and st.session_state.stl_bytes:
+            stl_viewer(st.session_state.stl_bytes, height=380)
         else:
-            st.image("icon.png", use_container_width=True)
+            st.image("icon.png", width="stretch")
 
 # -----------------------
 # 🔧 Tools
@@ -152,35 +271,65 @@ def plan_design(object: str, dimensions: str, operations: list, notes: str = "")
 
 
 def run_cadquery(code: str) -> str:
+    # CSS color names CadQuery/OCC doesn't accept
+    CSS_COLORS = {
+        "darkgray": (0.66,0.66,0.66), "darkgrey": (0.66,0.66,0.66),
+        "gray": (0.50,0.50,0.50),     "grey": (0.50,0.50,0.50),
+        "lightgray": (0.83,0.83,0.83),"lightgrey": (0.83,0.83,0.83),
+        "silver": (0.75,0.75,0.75),   "white": (1.0,1.0,1.0),
+        "black": (0.0,0.0,0.0),       "red": (1.0,0.0,0.0),
+        "green": (0.0,0.5,0.0),       "blue": (0.0,0.0,1.0),
+        "yellow": (1.0,1.0,0.0),      "orange": (1.0,0.65,0.0),
+        "cyan": (0.0,1.0,1.0),        "magenta": (1.0,0.0,1.0),
+        "brown": (0.65,0.16,0.16),    "gold": (1.0,0.84,0.0),
+        "darkblue": (0.0,0.0,0.55),   "darkred": (0.55,0.0,0.0),
+        "darkgreen": (0.0,0.39,0.0),
+    }
+    OrigColor = cq.Color
+    class SafeColor(OrigColor):
+        def __init__(self, *args, **kwargs):
+            if len(args) == 1 and isinstance(args[0], str):
+                name = args[0].lower().replace(" ", "")
+                if name in CSS_COLORS:
+                    r, g, b = CSS_COLORS[name]
+                    super().__init__(r, g, b)
+                    return
+            super().__init__(*args, **kwargs)
+
     try:
         local_vars = {}
-        exec(code, {"cq": cq}, local_vars)
+        cq_env = cq
+        cq_env.Color = SafeColor
+        exec(code, {"cq": cq_env}, local_vars)
         result = local_vars.get("result")
         if result is None:
             return "ERROR: 'result' not defined. Assign your final CadQuery shape to 'result'."
 
-        # Export to temp files (avoid relying on app dir write access on Cloud)
-        import tempfile, os as _os
-        with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp_stl:
-            stl_tmp = tmp_stl.name
-        with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as tmp_step:
-            step_tmp = tmp_step.name
+        # Export to tempfiles (always writable, even on Streamlit Cloud)
+        with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as f:
+            stl_path = f.name
+        with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as f:
+            step_path = f.name
 
-        cq.exporters.export(result, step_tmp)
-        cq.exporters.export(result, stl_tmp)
+        cq.exporters.export(result, stl_path)
+        cq.exporters.export(result, step_path)
 
-        # Read bytes into session state so viewer + downloads need no filesystem access
-        with open(stl_tmp, "rb") as f:
+        with open(stl_path, "rb") as f:
             st.session_state.stl_bytes = f.read()
-        with open(step_tmp, "rb") as f:
+        with open(step_path, "rb") as f:
             st.session_state.step_bytes = f.read()
 
-        _os.unlink(stl_tmp)
-        _os.unlink(step_tmp)
+        os.unlink(stl_path)
+        os.unlink(step_path)
 
         st.session_state.last_code = code
         st.session_state.model_ready = True
         return "SUCCESS: Model generated successfully."
+
+    except ValueError as e:
+        if "Unknown color name" in str(e):
+            return f"ERROR: {e}. Use RGB floats: cq.Color(0.5, 0.5, 0.5) — never CSS color name strings."
+        return f"ERROR: {e}"
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -248,6 +397,8 @@ CADQUERY RULES
   • Use mm unless user says otherwise
   • Think in operations: extrude → cut → fillet → shell — plan the sequence first
   • Common mappings: donut/ring → torus | pipe/tube → hollow cylinder | slot → rectangle cut
+  • Colors: NEVER use CSS names like "darkgray" — use RGB floats: cq.Color(0.66, 0.66, 0.66)
+  • NEVER mention or link to output.stl or output.step — the viewer and download buttons handle this
 
 ═══════════════════════════════════════
 DESIGN QUALITY
@@ -282,7 +433,6 @@ def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
         )
         steps += 1
 
-        # Show web search activity
         for item in response.output:
             if item.type == "web_search_call":
                 action = getattr(item, "action", None)
@@ -293,10 +443,8 @@ def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
                 else:
                     trace_box.write("🔍 Searching the web...")
 
-        # Check for custom function calls
         function_calls = [item for item in response.output if item.type == "function_call"]
 
-        # No function calls → agent is done (either asked a question or finished)
         if not function_calls:
             for item in response.output:
                 if item.type == "message":
@@ -306,10 +454,8 @@ def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
                     return text, model_generated
             return "Done.", model_generated
 
-        # Extend history with this turn's output
         input_messages.extend(response.output)
 
-        # Execute each function call
         for fc in function_calls:
             args = json.loads(fc.arguments)
 
