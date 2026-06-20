@@ -67,12 +67,10 @@ with right:
 
     with st.container(border=True):
         st.subheader("🔍 CAD View")
-        viewer_placeholder = st.empty()
         if st.session_state.model_ready:
-            with viewer_placeholder.container():
-                stl_from_file("output.stl", height=380)
+            stl_from_file("output.stl", height=380)
         else:
-            viewer_placeholder.image("icon.png", use_container_width=True)
+            st.image("icon.png", use_container_width=True)
 
 # -----------------------
 # 🔧 Tools
