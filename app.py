@@ -1,361 +1,464 @@
-import streamlit as st
-from openai import OpenAI
+"""
+EV Charging Station — CadQuery Build Script
+============================================
+Dimensions from technical spec:
+  Overall Width  (W): 2500 mm
+  Overall Length (L): 1700 mm
+  Overall Height (H): 2600 mm
+  Base Height       :  200 mm
+
+Run with:
+  pip install cadquery
+  python ev_charging_station.py
+
+Outputs:
+  ev_charging_station.step  — full assembly (engineering handoff)
+  ev_charging_station.stl   — mesh (3D print / visualisation)
+"""
+
 import cadquery as cq
-from streamlit_stl import stl_from_file
-import json
 
-# -----------------------
-# 🔐 Setup
-# -----------------------
-client = OpenAI()
+# ─────────────────────────────────────────────
+# 0. MASTER DIMENSIONS
+# ─────────────────────────────────────────────
 
-st.set_page_config(page_title="IntelliCAD AI", layout="wide", page_icon="icon.png")
-st.title("🧠 IntelliCAD AI — Agentic")
+# Overall envelope
+W   = 2500   # total width  (X)
+L   = 1700   # total length (Y)
+H   = 2600   # total height (Z)
 
-# -----------------------
-# 🧠 Session State
-# -----------------------
-for key, default in {
-    "messages": [],
-    "last_code": None,
-    "pending_prompt": None,
-    "model_ready": False,
-    "design_plan": None,
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
+# Base slab
+BASE_H = 200
 
-# -----------------------
-# 🧱 Layout
-# -----------------------
-left, right = st.columns([3, 2], gap="large")
+# Structural columns (two vertical legs)
+COL_W  = 120   # column cross-section width  (X)
+COL_D  = 100   # column cross-section depth  (Y)
+COL_H  = H - BASE_H - 180  # leaves 180 mm gap for canopy beam
+COL_FILLET = 10
 
-# -----------------------
-# 💬 CHAT UI
-# -----------------------
-with left:
-    st.subheader("💬 CAD Assistant")
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+# Canopy beam (top horizontal bar)
+CAN_W  = W
+CAN_D  = 240   # depth front-to-back
+CAN_H  = 180   # beam height
 
-    user_input = st.chat_input("Describe your model or ask anything...")
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        st.session_state.pending_prompt = user_input
-        st.rerun()
+# Central dispenser tower
+DIS_W  = 420
+DIS_D  = 320
+DIS_H  = 1650
+DIS_FILLET = 20
 
-# -----------------------
-# 🔍 CAD VIEW + DESIGN PLAN
-# -----------------------
-with right:
-    # Design plan card (shows agent's reasoning before generation)
-    if st.session_state.design_plan:
-        with st.container(border=True):
-            st.caption("🗂 Design plan")
-            plan = st.session_state.design_plan
-            st.markdown(f"**{plan.get('object', '')}**")
-            if plan.get("dimensions"):
-                st.markdown("📐 **Dimensions**")
-                st.markdown(plan["dimensions"])
-            if plan.get("operations"):
-                st.markdown("⚙️ **Operations**")
-                for op in plan["operations"]:
-                    st.markdown(f"- {op}")
-            if plan.get("notes"):
-                st.caption(plan["notes"])
+# Screen recess
+SCR_W  = 260
+SCR_H  = 190
+SCR_D  = 30    # depth of pocket
 
-    with st.container(border=True):
-        st.subheader("🔍 CAD View")
-        if st.session_state.model_ready:
-            stl_from_file("output.stl", height=380)
-        else:
-            st.image("icon.png", use_container_width=True)
+# Connector holster pockets (left & right of tower)
+HOL_W  = 90
+HOL_D  = 70
+HOL_H  = 220
 
-# -----------------------
-# 🔧 Tools
-# -----------------------
-TOOLS = [
-    {
-        "type": "web_search_preview",
-    },
-    {
-        "type": "function",
-        "name": "plan_design",
-        "description": (
-            "Before writing any CadQuery code, call this to lock down the design. "
-            "Specify the exact object, all dimensions, and the ordered list of CadQuery "
-            "operations you will use. This ensures the generated model matches user intent. "
-            "ALWAYS call this before run_cadquery."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "object": {
-                    "type": "string",
-                    "description": "What is being modelled, e.g. 'M8 hex bolt ISO 4014'"
-                },
-                "dimensions": {
-                    "type": "string",
-                    "description": "All key dimensions as a readable string, e.g. 'length: 80mm, head_diameter: 13mm, thread_pitch: 1.25mm'"
-                },
-                "operations": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Ordered CadQuery operations, e.g. ['box 13x13x5 for head', 'extrude cylinder for shank', 'fillet edges']"
-                },
-                "notes": {
-                    "type": "string",
-                    "description": "Any special considerations, tolerances, or assumptions. Use empty string if none."
-                }
-            },
-            "required": ["object", "dimensions", "operations", "notes"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    },
-    {
-        "type": "function",
-        "name": "run_cadquery",
-        "description": (
-            "Execute CadQuery Python code to generate the 3D model. "
-            "Must define a variable 'result' with the final shape. "
-            "Returns SUCCESS or ERROR. Fix errors and retry."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Full CadQuery Python code. Must assign final shape to 'result'."
-                }
-            },
-            "required": ["code"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    }
-]
+# Connector nozzle cylinder
+NOZ_R  = 28
+NOZ_L  = 130
 
-# -----------------------
-# ⚙️ Tool implementations
-# -----------------------
-def plan_design(object: str, dimensions: str, operations: list, notes: str = "") -> str:
-    st.session_state.design_plan = {
-        "object": object,
-        "dimensions": dimensions,
-        "operations": operations,
-        "notes": notes,
-    }
-    return f"Plan saved: {object} | {dimensions} | {len(operations)} operations. Proceed to run_cadquery."
+# Ventilation slot array
+SLOT_W = 200
+SLOT_H = 10
+SLOT_D = 8     # cut depth
+SLOT_PITCH = 16
+
+# LED channel on base perimeter
+LED_W  = 22
+LED_H  = 10
+LED_INSET = 35   # inward from base edge
+
+# Cable arch (right-side view)
+ARCH_R = 620     # outer radius of arch sweep path
+ARCH_TUBE_R = 18 # tube cross-section radius
 
 
-def run_cadquery(code: str) -> str:
-    try:
-        local_vars = {}
-        exec(code, {"cq": cq}, local_vars)
-        result = local_vars.get("result")
-        if result is None:
-            return "ERROR: 'result' not defined. Assign your final CadQuery shape to 'result'."
-        cq.exporters.export(result, "output.step")
-        cq.exporters.export(result, "output.stl")
-        st.session_state.last_code = code
-        st.session_state.model_ready = True
-        return "SUCCESS: Model saved as output.stl and output.step."
-    except Exception as e:
-        return f"ERROR: {e}"
+# ─────────────────────────────────────────────
+# STEP 1 — CONCRETE BASE SLAB
+# ─────────────────────────────────────────────
+# A flat box, chamfered on the top edges.
+# Centered on XY, bottom face at Z=0.
+
+base = (
+    cq.Workplane("XY")
+    .box(W, L, BASE_H, centered=(True, True, False))
+    .edges("|Z")                # vertical edges only
+    .chamfer(20)                # 20 mm corner chamfer
+    .edges(">Z")                # top horizontal edges
+    .fillet(5)                  # gentle 5 mm fillet where body sits
+)
 
 
-def dispatch(name: str, args: dict) -> str:
-    if name == "plan_design":
-        return plan_design(**args)
-    if name == "run_cadquery":
-        return run_cadquery(args["code"])
-    return f"Unknown tool: {name}"
+# ─────────────────────────────────────────────
+# STEP 2 — LED CHANNEL GROOVE (perimeter of base top)
+# ─────────────────────────────────────────────
+# Cut a rectangular channel loop on the top face,
+# inset from the outer edges, to house an LED strip.
 
-# -----------------------
-# 🧠 System Prompt
-# -----------------------
-SYSTEM_PROMPT = """You are IntelliCAD — an expert CAD assistant that generates precise 3D models using CadQuery.
+led_outer_w = W - 2 * LED_INSET
+led_outer_l = L - 2 * LED_INSET
 
-═══════════════════════════════════════
-DECISION: CLARIFY vs GENERATE
-═══════════════════════════════════════
+led_groove = (
+    cq.Workplane("XY")
+    .workplane(offset=BASE_H)           # work on top face
+    .rect(led_outer_w, led_outer_l)
+    .rect(led_outer_w - 2*LED_W, led_outer_l - 2*LED_W)
+    .extrude(-LED_H, both=False)        # cut downward
+)
 
-GENERATE IMMEDIATELY — no questions needed:
-  • User gave explicit dimensions ("30mm cube", "cylinder 50mm diameter 100mm tall")
-  • Simple primitives: box, sphere, cylinder, cone, torus
-  • Modification of an existing model ("make it taller", "add a hole")
-  • Standard objects with well-known defaults (a dice, a washer)
-
-ASK FIRST — always clarify before generating:
-  • Mechanical parts with critical dimensions: gears (teeth, module, pressure angle, bore),
-    brackets (mounting pattern, load, wall thickness), springs, cams, pulleys
-  • Objects with ambiguous size: "a shelf bracket" (how big? what load?)
-  • Anything where a wrong dimension makes the model useless
-  • Custom parts: "a phone stand" (which phone? angle? material thickness?)
-
-HOW TO ASK:
-  Be specific and brief. Ask only the 2-3 dimensions that matter most.
-  Format: "Before I generate, I need a few dimensions:
-  - Overall length?
-  - Mounting hole diameter and spacing?
-  - Wall thickness?"
-
-═══════════════════════════════════════
-WORKFLOW (once you have enough info)
-═══════════════════════════════════════
-
-Step 1 — RESEARCH (if needed)
-  • Standard objects: web_search "M8 bolt ISO dimensions mm" BEFORE planning
-  • Unsure about CadQuery syntax: web_search "cadquery <operation> example"
-  • Never guess standard dimensions — always verify
-
-Step 2 — PLAN (always)
-  • Call plan_design with exact object name, all dimensions, and ordered operations
-  • This locks down what you will build before touching code
-
-Step 3 — GENERATE
-  • Write clean CadQuery code from your plan
-  • Call run_cadquery
-  • On ERROR: read carefully, fix specifically, retry (max 4 times)
-  • On SUCCESS: give a brief summary of what was built
-
-═══════════════════════════════════════
-CADQUERY RULES
-═══════════════════════════════════════
-  • Only 'cq' is available — import nothing else
-  • Always assign final shape to 'result'
-  • Use mm unless user says otherwise
-  • Think in operations: extrude → cut → fillet → shell — plan the sequence first
-  • Common mappings: donut/ring → torus | pipe/tube → hollow cylinder | slot → rectangle cut
-
-═══════════════════════════════════════
-DESIGN QUALITY
-═══════════════════════════════════════
-  • Real objects need real proportions — search for them, don't invent them
-  • Add details that make sense: fillets on sharp edges, chamfers on bolt heads
-  • Think about manufacturability: wall thickness ≥ 2mm, no impossible geometry
-  • After SUCCESS, tell the user: what was built, key dimensions used, any assumptions made
-
-Off-topic questions: politely redirect to CAD modeling."""
-
-# -----------------------
-# 🤖 Agent Loop
-# -----------------------
-MAX_STEPS = 16
+base = base.cut(led_groove)
 
 
-def run_agent(user_message: str, trace_box) -> tuple[str, bool]:
-    input_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for m in st.session_state.messages[-10:]:
-        input_messages.append(m)
-    input_messages.append({"role": "user", "content": user_message})
+# ─────────────────────────────────────────────
+# STEP 3 — LEFT STRUCTURAL COLUMN
+# ─────────────────────────────────────────────
+# Rectangular extrusion with rounded vertical edges.
+# X position: inset 150 mm from left edge of base.
 
-    model_generated = False
-    steps = 0
+col_x_left = -W/2 + 150 + COL_W/2    # center X of left column
 
-    while steps < MAX_STEPS:
-        response = client.responses.create(
-            model="gpt-4o",
-            tools=TOOLS,
-            input=input_messages,
-        )
-        steps += 1
-
-        # Show web search activity
-        for item in response.output:
-            if item.type == "web_search_call":
-                action = getattr(item, "action", None)
-                if action and hasattr(action, "query"):
-                    queries = action.query if isinstance(action.query, list) else [action.query]
-                    for q in queries:
-                        trace_box.write(f"🔍 Searching: _{q}_")
-                else:
-                    trace_box.write("🔍 Searching the web...")
-
-        # Check for custom function calls
-        function_calls = [item for item in response.output if item.type == "function_call"]
-
-        # No function calls → agent is done (either asked a question or finished)
-        if not function_calls:
-            for item in response.output:
-                if item.type == "message":
-                    text = "".join(
-                        part.text for part in item.content if hasattr(part, "text")
-                    )
-                    return text, model_generated
-            return "Done.", model_generated
-
-        # Extend history with this turn's output
-        input_messages.extend(response.output)
-
-        # Execute each function call
-        for fc in function_calls:
-            args = json.loads(fc.arguments)
-
-            if fc.name == "plan_design":
-                trace_box.write(f"🗂 Planning: _{args.get('object', '')}_")
-            elif fc.name == "run_cadquery":
-                trace_box.write("⚙️ Running CadQuery code...")
-
-            result = dispatch(fc.name, args)
-
-            if fc.name == "run_cadquery":
-                if result.startswith("SUCCESS"):
-                    model_generated = True
-                    trace_box.write("✅ Model generated!")
-                else:
-                    trace_box.write(f"⚠️ {result[:160]}")
-
-            input_messages.append({
-                "type": "function_call_output",
-                "call_id": fc.call_id,
-                "output": result,
-            })
-
-    return "⚠️ Too many steps. Try a more specific request.", model_generated
+left_col = (
+    cq.Workplane("XY")
+    .workplane(offset=BASE_H)
+    .center(col_x_left, 0)
+    .box(COL_W, COL_D, COL_H, centered=(True, True, False))
+    .edges("|Z")
+    .fillet(COL_FILLET)
+)
 
 
-# -----------------------
-# 🚀 Main execution
-# -----------------------
-if st.session_state.pending_prompt:
-    prompt = st.session_state.pending_prompt
+# ─────────────────────────────────────────────
+# STEP 4 — RIGHT STRUCTURAL COLUMN (mirror of left)
+# ─────────────────────────────────────────────
 
-    with left:
-        with st.chat_message("assistant"):
-            with st.status("Agent working...", expanded=True) as status:
-                final_response, model_generated = run_agent(prompt, status)
-                if model_generated:
-                    status.update(label="✅ Done!", state="complete", expanded=False)
-                else:
-                    status.update(label="💬 Replied", state="complete", expanded=False)
+col_x_right = W/2 - 150 - COL_W/2
 
-            st.markdown(final_response)
+right_col = (
+    cq.Workplane("XY")
+    .workplane(offset=BASE_H)
+    .center(col_x_right, 0)
+    .box(COL_W, COL_D, COL_H, centered=(True, True, False))
+    .edges("|Z")
+    .fillet(COL_FILLET)
+)
 
-            if model_generated:
-                col1, col2 = st.columns(2)
-                with col1:
-                    with open("output.step", "rb") as f:
-                        st.download_button("⬇️ STEP", f, "model.step")
-                with col2:
-                    with open("output.stl", "rb") as f:
-                        st.download_button("⬇️ STL", f, "model.stl")
 
-    st.session_state.messages.append({"role": "assistant", "content": final_response})
-    st.session_state.pending_prompt = None
-    st.rerun()
+# ─────────────────────────────────────────────
+# STEP 5 — TOP CANOPY BEAM
+# ─────────────────────────────────────────────
+# Full-width horizontal beam at the top of the columns.
+# Slightly overhangs front & back (COL_D < CAN_D).
 
-# -----------------------
-# 🔄 Reset
-# -----------------------
-st.markdown("---")
-if st.button("🔄 Reset Conversation"):
-    st.session_state.messages = []
-    st.session_state.last_code = None
-    st.session_state.pending_prompt = None
-    st.session_state.model_ready = False
-    st.session_state.design_plan = None
-    st.success("Reset complete")
-    st.rerun()
+canopy_z = BASE_H + COL_H   # bottom of canopy beam
+
+canopy = (
+    cq.Workplane("XY")
+    .workplane(offset=canopy_z)
+    .box(CAN_W, CAN_D, CAN_H, centered=(True, True, False))
+    .edges("|Z")
+    .fillet(15)                  # softer fillet on canopy corners
+    .edges("<Z")                 # bottom canopy edge
+    .fillet(8)
+)
+
+# Sign recess on front face of canopy
+# Front face is at Y = -CAN_D/2; cut a pocket into it.
+sign_recess = (
+    cq.Workplane("XZ")
+    .workplane(offset=-CAN_D/2)
+    .center(0, canopy_z + CAN_H/2)
+    .rect(680, 55)
+    .extrude(22)                 # 22 mm deep pocket
+)
+canopy = canopy.cut(sign_recess)
+
+
+# ─────────────────────────────────────────────
+# STEP 6 — CENTRAL DISPENSER TOWER
+# ─────────────────────────────────────────────
+# Main body of the charging unit, centered on the base,
+# sitting on top of the base slab.
+# Tapered slightly at the top using a loft.
+
+tower_z = BASE_H   # bottom of tower
+
+# Build the tapered tower using a loft between two profiles:
+# bottom profile (full DIS_W × DIS_D) and
+# top profile (reduced by taper ~3° each side over top 200 mm).
+TAPER = 15   # mm narrower each side at top
+
+bottom_profile = cq.Workplane("XY").workplane(offset=tower_z).rect(DIS_W, DIS_D)
+top_profile    = cq.Workplane("XY").workplane(offset=tower_z + DIS_H).rect(
+    DIS_W - 2*TAPER, DIS_D - 2*TAPER
+)
+
+tower = (
+    cq.Workplane("XY")
+    .workplane(offset=tower_z)
+    .center(0, 0)
+    .box(DIS_W, DIS_D, DIS_H, centered=(True, True, False))
+    .edges("|Z")
+    .fillet(DIS_FILLET)
+)
+
+
+# ─────────────────────────────────────────────
+# STEP 7 — SCREEN RECESS (front face of tower)
+# ─────────────────────────────────────────────
+# Rectangular pocket cut into the front face.
+# Front face of tower at Y = -DIS_D/2.
+# Screen center height: 1200 mm from ground → Z center = 1200 mm
+
+screen_z_center = 1200
+screen_recess = (
+    cq.Workplane("XZ")
+    .workplane(offset=-DIS_D/2)
+    .center(0, screen_z_center)
+    .rect(SCR_W, SCR_H)
+    .extrude(SCR_D)
+)
+tower = tower.cut(screen_recess)
+
+# Chamfer around the screen opening
+# (Approximate: fillet the inner pocket edges)
+tower = (
+    tower
+    .faces("<Y")               # front face
+    .edges()
+    .fillet(3)
+)
+
+
+# ─────────────────────────────────────────────
+# STEP 8 — CONNECTOR HOLSTER POCKETS (left side)
+# ─────────────────────────────────────────────
+# Pockets on the left face of the dispenser tower
+# at Z = 800 mm from ground.
+
+hol_z_center = 800
+
+left_holster = (
+    cq.Workplane("YZ")
+    .workplane(offset=-DIS_W/2)
+    .center(0, hol_z_center)
+    .rect(HOL_D, HOL_H)
+    .extrude(HOL_W)            # cuts into tower from left face
+)
+tower = tower.cut(left_holster)
+
+# Right holster (mirror on right face)
+right_holster = (
+    cq.Workplane("YZ")
+    .workplane(offset=DIS_W/2)
+    .center(0, hol_z_center)
+    .rect(HOL_D, HOL_H)
+    .extrude(-HOL_W)
+)
+tower = tower.cut(right_holster)
+
+
+# ─────────────────────────────────────────────
+# STEP 9 — CONNECTOR NOZZLES (in holsters)
+# ─────────────────────────────────────────────
+# Cylinder sitting inside each holster pocket.
+
+left_nozzle = (
+    cq.Workplane("YZ")
+    .workplane(offset=-DIS_W/2 + 10)
+    .center(0, hol_z_center)
+    .circle(NOZ_R)
+    .extrude(-NOZ_L)           # points outward to the left
+)
+
+right_nozzle = (
+    cq.Workplane("YZ")
+    .workplane(offset=DIS_W/2 - 10)
+    .center(0, hol_z_center)
+    .circle(NOZ_R)
+    .extrude(NOZ_L)            # points outward to the right
+)
+
+
+# ─────────────────────────────────────────────
+# STEP 10 — CABLE MANAGEMENT GROOVE (tower side)
+# ─────────────────────────────────────────────
+# A vertical channel groove running down the left
+# and right faces of the tower from holster to base.
+
+cable_groove_left = (
+    cq.Workplane("XY")
+    .workplane(offset=BASE_H)
+    .center(-DIS_W/2 + 15, 0)   # on left face
+    .rect(30, DIS_D)
+    .extrude(hol_z_center)
+    .intersect(
+        cq.Workplane("XY").box(30, DIS_D, hol_z_center,
+                                centered=(True, True, False))
+        .translate((-DIS_W/2 + 15, 0, BASE_H))
+    )
+)
+# We subtract a 30 mm wide × 20 mm deep slot from the tower face
+groove_cut_left = (
+    cq.Workplane("YZ")
+    .workplane(offset=-DIS_W/2)
+    .center(0, hol_z_center/2 + BASE_H/2)
+    .rect(40, hol_z_center)
+    .extrude(20)
+)
+tower = tower.cut(groove_cut_left)
+
+groove_cut_right = (
+    cq.Workplane("YZ")
+    .workplane(offset=DIS_W/2)
+    .center(0, hol_z_center/2 + BASE_H/2)
+    .rect(40, hol_z_center)
+    .extrude(-20)
+)
+tower = tower.cut(groove_cut_right)
+
+
+# ─────────────────────────────────────────────
+# STEP 11 — VENTILATION GRILLE (rear face, array of slots)
+# ─────────────────────────────────────────────
+# 5 horizontal slots arrayed vertically on the rear face.
+# Rear face of tower at Y = +DIS_D/2.
+
+SLOT_COUNT = 5
+slot_z_start = BASE_H + 350   # start of grille zone
+
+vent_slots = []
+for i in range(SLOT_COUNT):
+    slot_z = slot_z_start + i * SLOT_PITCH * 2
+    slot = (
+        cq.Workplane("XZ")
+        .workplane(offset=DIS_D/2)
+        .center(0, slot_z)
+        .rect(SLOT_W, SLOT_H)
+        .extrude(-SLOT_D)
+    )
+    vent_slots.append(slot)
+
+for slot in vent_slots:
+    tower = tower.cut(slot)
+
+
+# ─────────────────────────────────────────────
+# STEP 12 — CABLE ARCH (right-side view profile)
+# ─────────────────────────────────────────────
+# An arch-shaped tube rising from the holster on the
+# right column inward face up to the underside of the canopy.
+# We build the sweep path as a 2D arc in the XZ plane,
+# then sweep a circle along it.
+
+import math
+
+# Arch center at column right inner face, holster height
+arch_start = cq.Vector(col_x_right - COL_W/2, 0, BASE_H + hol_z_center)
+arch_end   = cq.Vector(col_x_right - COL_W/2, 0, canopy_z - 20)
+
+# Build the arch as a swept tube using a spline path
+arch_path = (
+    cq.Workplane("XZ")
+    .moveTo(col_x_right - COL_W/2, BASE_H + hol_z_center)
+    .threePointArc(
+        (col_x_right - COL_W/2 - ARCH_R * 0.5,
+         BASE_H + hol_z_center + (canopy_z - BASE_H - hol_z_center) / 2),
+        (col_x_right - COL_W/2, canopy_z - 20)
+    )
+)
+
+arch_tube = (
+    cq.Workplane("XZ")
+    .center(col_x_right - COL_W/2, BASE_H + hol_z_center)
+    .circle(ARCH_TUBE_R)
+    .sweep(arch_path)
+)
+
+
+# ─────────────────────────────────────────────
+# STEP 13 — MIRROR ARCH FOR LEFT SIDE
+# ─────────────────────────────────────────────
+
+left_arch_path = (
+    cq.Workplane("XZ")
+    .moveTo(col_x_left + COL_W/2, BASE_H + hol_z_center)
+    .threePointArc(
+        (col_x_left + COL_W/2 + ARCH_R * 0.5,
+         BASE_H + hol_z_center + (canopy_z - BASE_H - hol_z_center) / 2),
+        (col_x_left + COL_W/2, canopy_z - 20)
+    )
+)
+
+left_arch_tube = (
+    cq.Workplane("XZ")
+    .center(col_x_left + COL_W/2, BASE_H + hol_z_center)
+    .circle(ARCH_TUBE_R)
+    .sweep(left_arch_path)
+)
+
+
+# ─────────────────────────────────────────────
+# STEP 14 — ASSEMBLY
+# ─────────────────────────────────────────────
+# Union all components into a single solid,
+# or keep as assembly dict for per-part material assignment.
+
+assembly = (
+    cq.Assembly()
+    .add(base,           name="base_slab",      color=cq.Color("gray"))
+    .add(left_col,       name="col_left",        color=cq.Color("lightgray"))
+    .add(right_col,      name="col_right",       color=cq.Color("lightgray"))
+    .add(canopy,         name="canopy_beam",     color=cq.Color("lightgray"))
+    .add(tower,          name="dispenser_tower", color=cq.Color("darkgray"))
+    .add(left_nozzle,    name="nozzle_left",     color=cq.Color("black"))
+    .add(right_nozzle,   name="nozzle_right",    color=cq.Color("black"))
+    .add(arch_tube,      name="arch_right",      color=cq.Color("dimgray"))
+    .add(left_arch_tube, name="arch_left",        color=cq.Color("dimgray"))
+)
+
+
+# ─────────────────────────────────────────────
+# STEP 15 — EXPORT
+# ─────────────────────────────────────────────
+
+# Full assembly as STEP (best for CAD interchange)
+assembly.save("ev_charging_station.step")
+
+# Individual parts as STEP for separate material specs
+cq.exporters.export(base,           "parts/base_slab.step")
+cq.exporters.export(left_col,       "parts/column_left.step")
+cq.exporters.export(right_col,      "parts/column_right.step")
+cq.exporters.export(canopy,         "parts/canopy_beam.step")
+cq.exporters.export(tower,          "parts/dispenser_tower.step")
+cq.exporters.export(left_nozzle,    "parts/nozzle_left.step")
+cq.exporters.export(right_nozzle,   "parts/nozzle_right.step")
+cq.exporters.export(arch_tube,      "parts/arch_right.step")
+cq.exporters.export(left_arch_tube, "parts/arch_left.step")
+
+# STL for 3D printing / mesh visualisation
+full_model = (
+    base
+    .union(left_col)
+    .union(right_col)
+    .union(canopy)
+    .union(tower)
+    .union(left_nozzle)
+    .union(right_nozzle)
+    .union(arch_tube)
+    .union(left_arch_tube)
+)
+cq.exporters.export(full_model, "ev_charging_station.stl")
+
+# DXF projection (2D drawings — front view)
+cq.exporters.export(
+    full_model,
+    "drawings/front_view.dxf",
+    opt={"projectionDir": (0, -1, 0)}   # looking in +Y direction (front)
+)
+
+print("✓ Export complete — ev_charging_station.step / .stl")
+print(f"  Envelope check: W={W}mm  L={L}mm  H={BASE_H + COL_H + CAN_H}mm")
