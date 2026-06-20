@@ -345,10 +345,6 @@ if st.session_state.pending_prompt:
                     with open("output.stl", "rb") as f:
                         st.download_button("⬇️ STL", f, "model.stl")
 
-    if model_generated:
-        with viewer_placeholder.container():
-            stl_from_file("output.stl", height=380)
-
     st.session_state.messages.append({"role": "assistant", "content": final_response})
     st.session_state.pending_prompt = None
     st.rerun()
