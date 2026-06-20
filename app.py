@@ -1,14 +1,8 @@
-import os
 import streamlit as st
 from openai import OpenAI
 import cadquery as cq
-from streamlit_stl import stl_from_file
+from streamlit_stl import stl_from_text
 import json
-
-# Absolute paths so exports/imports work regardless of working directory
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STL_PATH = os.path.join(_BASE_DIR, "output.stl")
-STEP_PATH = os.path.join(_BASE_DIR, "output.step")
 
 # -----------------------
 # 🔐 Setup
@@ -27,6 +21,7 @@ for key, default in {
     "pending_prompt": None,
     "model_ready": False,
     "design_plan": None,
+    "stl_bytes": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -73,8 +68,8 @@ with right:
 
     with st.container(border=True):
         st.subheader("🔍 CAD View")
-        if st.session_state.model_ready:
-            stl_from_file(STL_PATH, height=380)
+        if st.session_state.model_ready and st.session_state.get("stl_bytes"):
+            stl_from_text(st.session_state.stl_bytes, height=380, auto_rotate=True)
         else:
             st.image("icon.png", use_container_width=True)
 
@@ -157,54 +152,35 @@ def plan_design(object: str, dimensions: str, operations: list, notes: str = "")
 
 
 def run_cadquery(code: str) -> str:
-    # Resolve paths inline — never rely on globals being visible inside exec()
-    import os as _os
-    _base = _os.path.dirname(_os.path.abspath(__file__))
-    _stl = _os.path.join(_base, "output.stl")
-    _step = _os.path.join(_base, "output.step")
-
-    # CSS color name → RGB float mapping (CadQuery/OCC rejects CSS names)
-    _CSS_COLORS = {
-        "darkgray": (0.66,0.66,0.66), "darkgrey": (0.66,0.66,0.66),
-        "gray": (0.50,0.50,0.50),     "grey": (0.50,0.50,0.50),
-        "lightgray": (0.83,0.83,0.83),"lightgrey": (0.83,0.83,0.83),
-        "silver": (0.75,0.75,0.75),   "white": (1.0,1.0,1.0),
-        "black": (0.0,0.0,0.0),       "red": (1.0,0.0,0.0),
-        "green": (0.0,0.5,0.0),       "blue": (0.0,0.0,1.0),
-        "yellow": (1.0,1.0,0.0),      "orange": (1.0,0.65,0.0),
-        "cyan": (0.0,1.0,1.0),        "magenta": (1.0,0.0,1.0),
-        "brown": (0.65,0.16,0.16),    "gold": (1.0,0.84,0.0),
-        "darkblue": (0.0,0.0,0.55),   "darkred": (0.55,0.0,0.0),
-        "darkgreen": (0.0,0.39,0.0),
-    }
-    _OrigColor = cq.Color
-    class _SafeColor(_OrigColor):
-        def __init__(self, *args, **kwargs):
-            if len(args) == 1 and isinstance(args[0], str):
-                name = args[0].lower().replace(" ", "")
-                if name in _CSS_COLORS:
-                    r, g, b = _CSS_COLORS[name]
-                    super().__init__(r, g, b)
-                    return
-            super().__init__(*args, **kwargs)
-
     try:
         local_vars = {}
-        _cq_patched = cq
-        _cq_patched.Color = _SafeColor
-        exec(code, {"cq": _cq_patched}, local_vars)
+        exec(code, {"cq": cq}, local_vars)
         result = local_vars.get("result")
         if result is None:
             return "ERROR: 'result' not defined. Assign your final CadQuery shape to 'result'."
-        cq.exporters.export(result, _step)
-        cq.exporters.export(result, _stl)
+
+        # Export to temp files (avoid relying on app dir write access on Cloud)
+        import tempfile, os as _os
+        with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp_stl:
+            stl_tmp = tmp_stl.name
+        with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as tmp_step:
+            step_tmp = tmp_step.name
+
+        cq.exporters.export(result, step_tmp)
+        cq.exporters.export(result, stl_tmp)
+
+        # Read bytes into session state so viewer + downloads need no filesystem access
+        with open(stl_tmp, "rb") as f:
+            st.session_state.stl_bytes = f.read()
+        with open(step_tmp, "rb") as f:
+            st.session_state.step_bytes = f.read()
+
+        _os.unlink(stl_tmp)
+        _os.unlink(step_tmp)
+
         st.session_state.last_code = code
         st.session_state.model_ready = True
         return "SUCCESS: Model generated successfully."
-    except ValueError as e:
-        if "Unknown color name" in str(e):
-            return f"ERROR: {e}. Use RGB floats: cq.Color(0.5, 0.5, 0.5) — never CSS color name strings."
-        return f"ERROR: {e}"
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -380,11 +356,9 @@ if st.session_state.pending_prompt:
             if model_generated:
                 col1, col2 = st.columns(2)
                 with col1:
-                    with open(STEP_PATH, "rb") as f:
-                        st.download_button("⬇️ STEP", f, "model.step")
+                    st.download_button("⬇️ STEP", st.session_state.step_bytes, "model.step")
                 with col2:
-                    with open(STL_PATH, "rb") as f:
-                        st.download_button("⬇️ STL", f, "model.stl")
+                    st.download_button("⬇️ STL", st.session_state.stl_bytes, "model.stl")
 
     st.session_state.messages.append({"role": "assistant", "content": final_response})
     st.session_state.pending_prompt = None
@@ -400,5 +374,7 @@ if st.button("🔄 Reset Conversation"):
     st.session_state.pending_prompt = None
     st.session_state.model_ready = False
     st.session_state.design_plan = None
+    st.session_state.stl_bytes = None
+    st.session_state.step_bytes = None
     st.success("Reset complete")
     st.rerun()
